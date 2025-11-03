@@ -1,0 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* You can add project-wide custom Tailwind component styles below */
+
+/* Keep existing CSS in styles.css for now; migrate rules to Tailwind gradually if desired */

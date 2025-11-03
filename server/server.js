@@ -1,14 +1,24 @@
 // server.js - Main server file for Socket.io chat application
 
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
-const dotenv = require('dotenv');
-const path = require('path');
+import express from 'express';
+import http from 'http';
+import { Server } from 'socket.io';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { initSocket } from './socket/index.js';
+import { getMessages } from './models/messages.js';
+import { getUsers } from './models/users.js';
+import { connectDB } from './config/db.js';
+import mongoose from './config/db.js';
 
-// Load environment variables
-dotenv.config();
+// Load environment variables from server/.env (explicit path so .env inside server/ is used)
+dotenv.config({ path: path.join(process.cwd(), 'server', '.env') });
+
+// __dirname for ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Initialize Express app
 const app = express();
@@ -26,96 +36,25 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Store connected users and messages
-const users = {};
-const messages = [];
-const typingUsers = {};
-
-// Socket.io connection handler
-io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id}`);
-
-  // Handle user joining
-  socket.on('user_join', (username) => {
-    users[socket.id] = { username, id: socket.id };
-    io.emit('user_list', Object.values(users));
-    io.emit('user_joined', { username, id: socket.id });
-    console.log(`${username} joined the chat`);
-  });
-
-  // Handle chat messages
-  socket.on('send_message', (messageData) => {
-    const message = {
-      ...messageData,
-      id: Date.now(),
-      sender: users[socket.id]?.username || 'Anonymous',
-      senderId: socket.id,
-      timestamp: new Date().toISOString(),
-    };
-    
-    messages.push(message);
-    
-    // Limit stored messages to prevent memory issues
-    if (messages.length > 100) {
-      messages.shift();
-    }
-    
-    io.emit('receive_message', message);
-  });
-
-  // Handle typing indicator
-  socket.on('typing', (isTyping) => {
-    if (users[socket.id]) {
-      const username = users[socket.id].username;
-      
-      if (isTyping) {
-        typingUsers[socket.id] = username;
-      } else {
-        delete typingUsers[socket.id];
-      }
-      
-      io.emit('typing_users', Object.values(typingUsers));
-    }
-  });
-
-  // Handle private messages
-  socket.on('private_message', ({ to, message }) => {
-    const messageData = {
-      id: Date.now(),
-      sender: users[socket.id]?.username || 'Anonymous',
-      senderId: socket.id,
-      message,
-      timestamp: new Date().toISOString(),
-      isPrivate: true,
-    };
-    
-    socket.to(to).emit('private_message', messageData);
-    socket.emit('private_message', messageData);
-  });
-
-  // Handle disconnection
-  socket.on('disconnect', () => {
-    if (users[socket.id]) {
-      const { username } = users[socket.id];
-      io.emit('user_left', { username, id: socket.id });
-      console.log(`${username} left the chat`);
-    }
-    
-    delete users[socket.id];
-    delete typingUsers[socket.id];
-    
-    io.emit('user_list', Object.values(users));
-    io.emit('typing_users', Object.values(typingUsers));
-  });
-});
+// Initialize socket handlers from modular file
+initSocket(io);
 
 // API routes
-app.get('/api/messages', (req, res) => {
-  res.json(messages);
+app.get('/api/messages', async (req, res) => {
+  // support simple pagination: ?page=1&limit=50
+  const page = parseInt(req.query.page || '1', 10);
+  const limit = parseInt(req.query.limit || '50', 10);
+  try {
+    const rows = await getMessages({ page, limit });
+    res.json(rows);
+  } catch (err) {
+    console.error('Failed to load messages', err.message);
+    res.status(500).json({ error: 'Failed to load messages' });
+  }
 });
 
 app.get('/api/users', (req, res) => {
-  res.json(Object.values(users));
+  res.json(getUsers());
 });
 
 // Root route
@@ -123,10 +62,55 @@ app.get('/', (req, res) => {
   res.send('Socket.io Chat Server is running');
 });
 
-// Start server
+// Start server only after DB connection
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
 
-module.exports = { app, server, io }; 
+(async () => {
+  try {
+    await connectDB()
+    server.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error('Failed to start server due to DB connection error')
+    process.exit(1)
+  }
+})();
+
+// Graceful shutdown
+async function shutdown(signal) {
+  try {
+    console.log(`\nReceived ${signal} — closing server gracefully...`);
+    // stop accepting new connections
+    server.close((err) => {
+      if (err) console.error('Error closing HTTP server:', err);
+      else console.log('HTTP server closed');
+    });
+
+    // close socket.io
+    try {
+      io.close(() => console.log('Socket.io server closed'))
+    } catch (e) {
+      console.warn('Socket.io close error', e.message)
+    }
+
+    // disconnect mongoose
+    try {
+      await mongoose.disconnect()
+      console.log('Disconnected from MongoDB')
+    } catch (e) {
+      console.warn('Error disconnecting mongoose', e.message)
+    }
+
+    // give things a moment to finish then exit
+    setTimeout(() => process.exit(0), 500)
+  } catch (err) {
+    console.error('Error during shutdown', err)
+    process.exit(1)
+  }
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+
+export { app, server, io };

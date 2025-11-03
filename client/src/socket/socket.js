@@ -23,10 +23,16 @@ export const useSocket = () => {
   const [typingUsers, setTypingUsers] = useState([]);
 
   // Connect to socket server
-  const connect = (username) => {
+  // Connect to socket server
+  // options: { avatar }
+  const connect = (username, options = {}) => {
     socket.connect();
     if (username) {
       socket.emit('user_join', username);
+      if (options.avatar) {
+        // immediately send profile update
+        socket.emit('update_profile', { avatar: options.avatar, username });
+      }
     }
   };
 
@@ -36,9 +42,63 @@ export const useSocket = () => {
   };
 
   // Send a message
-  const sendMessage = (message) => {
-    socket.emit('send_message', { message });
+  // Send a message. Supports optional attachment (base64) and acknowledgement callback
+  const sendMessage = (message, options = {}, cb) => {
+    // message: string or object
+    // options: { attachment?: string, to?: socketId (for private), tempId?: string }
+    const tempId = options.tempId || `t-${Date.now()}-${Math.floor(Math.random() * 1000)}`
+    const payload = {
+      tempId,
+      message: typeof message === 'string' ? message : message.text || message,
+      attachment: options.attachment || null,
+      to: options.to || null,
+      isPrivate: !!options.to,
+    };
+
+    // Optimistic UI: append a local message with tempId so user sees immediate feedback
+    const optimistic = {
+      tempId: payload.tempId,
+      sender: 'You',
+      message: payload.message,
+      attachment: payload.attachment,
+      timestamp: new Date().toISOString(),
+      delivered: false,
+      readBy: [],
+    }
+    setMessages((prev) => [...prev, optimistic]);
+
+    socket.emit('send_message', payload, (ack) => {
+      // ack: { status, id, timestamp }
+      if (ack && ack.id) {
+        // Update messages state to mark as acknowledged/delivered and replace tempId
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.tempId && m.tempId === payload.tempId
+              ? { ...m, id: ack.id, delivered: true, deliveredAt: ack.timestamp }
+              : m
+          )
+        );
+      }
+      if (typeof cb === 'function') cb(ack);
+    });
   };
+
+  // Load message history (pagination)
+  const loadMessages = async ({ page = 1, limit = 50 } = {}) => {
+    try {
+      const res = await fetch(`${SOCKET_URL}/api/messages?page=${page}&limit=${limit}`);
+      let data = []
+      try { data = await res.json() } catch (e) { data = [] }
+      if (Array.isArray(data)) {
+        // Prepend older messages so newest are at the end
+        setMessages((prev) => [...data, ...prev])
+      }
+      return data
+    } catch (err) {
+      console.warn('Failed to load messages', err.message)
+      return []
+    }
+  }
 
   // Send a private message
   const sendPrivateMessage = (to, message) => {
@@ -64,12 +124,46 @@ export const useSocket = () => {
     // Message events
     const onReceiveMessage = (message) => {
       setLastMessage(message);
-      setMessages((prev) => [...prev, message]);
+      setMessages((prev) => {
+        // If this message corresponds to an optimistic message (tempId), replace it
+        if (message && message.tempId) {
+          const found = prev.some((m) => m.tempId === message.tempId)
+          if (found) return prev.map((m) => (m.tempId === message.tempId ? message : m))
+        }
+        return [...prev, message]
+      })
     };
 
     const onPrivateMessage = (message) => {
       setLastMessage(message);
-      setMessages((prev) => [...prev, message]);
+      setMessages((prev) => {
+        if (message && message.tempId) {
+          const found = prev.some((m) => m.tempId === message.tempId)
+          if (found) return prev.map((m) => (m.tempId === message.tempId ? message : m))
+        }
+        return [...prev, message]
+      })
+    };
+
+    // Delivery acknowledgement from server (for immediate delivered status)
+    const onMessageDelivered = ({ id, deliveredAt }) => {
+      setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, delivered: true, deliveredAt } : m)));
+    };
+
+    // Read receipts
+    const onMessageRead = ({ messageId, readerId, reader }) => {
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id === messageId) {
+              const readBy = Array.isArray(m.readBy) ? [...m.readBy] : [];
+              // store objects with readerId and reader name to display names in UI
+              const already = readBy.some((r) => r && (r.readerId === readerId || r === readerId));
+              if (!already) readBy.push({ readerId, reader, readAt: new Date().toISOString() });
+              return { ...m, readBy };
+            }
+            return m;
+          })
+        );
     };
 
     // User events
@@ -117,6 +211,8 @@ export const useSocket = () => {
     socket.on('user_joined', onUserJoined);
     socket.on('user_left', onUserLeft);
     socket.on('typing_users', onTypingUsers);
+  socket.on('message_delivered', onMessageDelivered);
+  socket.on('message_read', onMessageRead);
 
     // Clean up event listeners
     return () => {
@@ -128,6 +224,8 @@ export const useSocket = () => {
       socket.off('user_joined', onUserJoined);
       socket.off('user_left', onUserLeft);
       socket.off('typing_users', onTypingUsers);
+      socket.off('message_delivered', onMessageDelivered);
+      socket.off('message_read', onMessageRead);
     };
   }, []);
 

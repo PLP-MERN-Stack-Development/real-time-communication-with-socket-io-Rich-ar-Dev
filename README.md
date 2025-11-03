@@ -51,6 +51,18 @@ socketio-chat/
   - Socket.io configuration templates
   - Sample components for the chat interface
 
+## Implemented (in this workspace)
+
+This repository includes a minimal working server and a simple React client scaffold wired to Socket.io. Implemented features in the starter code include:
+
+- Server-side Socket.io setup with handlers for: user join/leave, global messages, private messages, typing indicators, message delivery acknowledgements, and read receipts.
+- Modular server structure: `server/models`, `server/socket`, `server/controllers` (placeholders), `server/utils`.
+- In-memory message and user stores with simple pagination for messages (`/api/messages?page=1&limit=50`).
+- Client-side React scaffold (Vite): `client/src` with `App.jsx`, `components/Login.jsx`, `components/Chat.jsx`, and a `useSocket` hook in `client/src/socket/socket.js`.
+- Client features: username login, global chat, private messaging via clicking a user in the sidebar, typing indicators, attachments (base64 image upload), basic read/delivery UI fields.
+
+Note: This is a starter implementation — messages are stored in-memory and will be lost on restart. For production use persist messages to a database.
+
 ## Requirements
 
 - Node.js (v18 or higher)
